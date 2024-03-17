@@ -1,7 +1,8 @@
 import bpy
-import os
+from pathlib import Path
 import subprocess
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 
 bl_info = {
     "name": "TexConv",
@@ -13,44 +14,43 @@ bl_info = {
     "category": "Material"
 }
 
-addon_dir = os.path.dirname(__file__)
-texconv_exe = os.path.join(addon_dir, "texconv.exe")
+addon_dir = Path(__file__).parent
+texconv_exe = addon_dir / "texconv.exe"
 
-# Function to convert image file to DDS format
-def convert_to_dds(input_file, output_file, compression_format):
-    command = [
-        texconv_exe,
-        "-nologo",
-        "-pow2",
-        "-f", compression_format,
-        "-srgb", "off",  # Disable sRGB gamma correction
-        "-y",
-        "-ft", "DDS",
-        input_file,
-        "-o", os.path.dirname(output_file),
-    ]
-    subprocess.run(command, shell=True)
+# Generalized function to convert image files
+def convert_file(input_file, output_file, file_type, compression_format=None):
+    command = [str(texconv_exe), "-nologo", "-pow2", "-y", "-ft", file_type, str(input_file), "-o", str(output_file.parent)]
+    if compression_format:
+        command.extend(["-f", compression_format])
+    if file_type.upper() == "PNG":
+        command.append("-srgb")
+        command.append("on")
+    else:
+        command.append("-srgb")
+        command.append("off")
+    result = subprocess.run(command, capture_output=True)
+    if result.returncode != 0:
+        print(f"Error converting file: {result.stderr.decode()}")
 
-# Function to convert image file to PNG format
-def convert_to_png(input_file, output_file):
-    command = [
-        texconv_exe,
-        "-nologo",
-        "-pow2",
-        "-srgb", "on",  # Enable sRGB gamma correction
-        "-y",
-        "-ft", "PNG",
-        input_file,
-        "-o", os.path.dirname(output_file),
-    ]
-    subprocess.run(command, shell=True)
+# Function to fix mip maps for a single image
+def fix_mip_maps_for_image(image_path, output_folder):
+    image_path = Path(image_path)
+    output_folder = Path(output_folder)
+    fixed_dds_path = output_folder / image_path.name
+    temp_png_path = fixed_dds_path.with_suffix(".png")
+    convert_file(image_path, temp_png_path, "PNG")
+    material_compression_format = get_compression_format_from_name(image_path.name)
+    convert_file(temp_png_path, fixed_dds_path, "DDS", material_compression_format or "BC3_UNORM")
+    temp_png_path.unlink()  # Delete the temporary PNG file
 
-# Function to move DDS textures to the new folder
-def move_dds_textures(blend_file_dir, dds_dir):
-    for root, dirs, files in os.walk(blend_file_dir):
-        for file in files:
-            if file.lower().endswith('.dds'):
-                shutil.move(os.path.join(root, file), os.path.join(dds_dir, file))
+# Function to fix mip maps for textures in a folder
+def fix_folder_mip_maps(folder_path, output_folder):
+    folder_path = Path(folder_path)
+    output_folder = Path(output_folder)
+    with ThreadPoolExecutor(max_workers=4) as executor:  # Limiting to 4 workers
+        for file_path in folder_path.glob('*.dds'):
+            material_compression_format = get_compression_format_from_name(file_path.name)
+            executor.submit(convert_file, file_path, output_folder / file_path.name, "DDS", material_compression_format or "BC3_UNORM")
 
 # Function to get the compression format from the material name
 def get_compression_format_from_name(material_name):
@@ -76,19 +76,23 @@ class ConvertToDDSPanel(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        layout.label(text="Compression Format:")
-        layout.prop(scene, "compression_format", text="")
+        layout.use_property_split = True
+        layout.use_property_decorate = False  # No animation.
 
-        row = layout.row()
+        row = layout.row(align=True)
+        row.prop(scene, "compression_format", text="Compression Format")
+
+        row = layout.row(align=True)
         row.operator("object.convert_to_dds", text="Convert")
         row.operator("object.fix_mip_maps", text="Fix Mip Maps")
 
         layout.separator()
 
         layout.label(text="Folder Operations:")
-        row = layout.row()
+
+        row = layout.row(align=True)
         row.prop(scene, "selected_folder", text="Folder")
-        row.operator("object.fix_folder_mip_maps", text="Fix Folder Mip Maps")
+        row.operator("object.fix_folder_mip_maps", text="Fix Mip Maps")
 
 # Operator to execute DDS conversion
 class OBJECT_OT_ConvertToDDS(bpy.types.Operator):
@@ -99,9 +103,8 @@ class OBJECT_OT_ConvertToDDS(bpy.types.Operator):
     def execute(self, context):
         selected_object = context.active_object
         blend_file_dir = bpy.path.abspath("//")
-        dds_dir = os.path.join(blend_file_dir, "dds-textures")
-        if not os.path.exists(dds_dir):
-            os.makedirs(dds_dir)
+        dds_dir = Path(blend_file_dir) / "dds-textures"
+        dds_dir.mkdir(parents=True, exist_ok=True)
 
         for material_slot in selected_object.material_slots:
             material = material_slot.material
@@ -109,26 +112,23 @@ class OBJECT_OT_ConvertToDDS(bpy.types.Operator):
                 for node in material.node_tree.nodes:
                     if node.type == 'TEX_IMAGE' and node.image:
                         image_path = bpy.path.abspath(node.image.filepath)
-                        if os.path.exists(image_path):
+                        if Path(image_path).exists():
                             if image_path.lower().endswith('.dds'):
-                                shutil.move(image_path, os.path.join(dds_dir, os.path.basename(image_path)))
+                                shutil.move(image_path, dds_dir / Path(image_path).name)
                             else:
-                                image_copy_path = os.path.join(blend_file_dir, os.path.basename(image_path))
-                                shutil.copy2(image_path, image_copy_path)
-                                dds_filename = os.path.splitext(os.path.basename(image_copy_path))[0] + ".dds"
-                                dds_path = os.path.join(dds_dir, dds_filename)
+                                dds_filename = Path(image_path).stem + ".dds"
+                                dds_path = dds_dir / dds_filename
                                 material_compression_format = get_compression_format_from_name(material.name)
                                 if material_compression_format:
-                                    convert_to_dds(image_copy_path, dds_path, material_compression_format)
+                                    convert_file(Path(image_path), dds_path, "DDS", material_compression_format)
                                 else:
-                                    original_compression_format = get_compression_format_from_name(os.path.basename(image_path))
+                                    original_compression_format = get_compression_format_from_name(Path(image_path).name)
                                     if original_compression_format:
-                                        convert_to_dds(image_copy_path, dds_path, original_compression_format)
+                                        convert_file(Path(image_path), dds_path, "DDS", original_compression_format)
                                     else:
-                                        convert_to_dds(image_copy_path, dds_path, context.scene.compression_format)
-                                node.image.filepath = bpy.path.relpath(dds_path)
+                                        convert_file(Path(image_path), dds_path, "DDS", context.scene.compression_format)
+                                node.image.filepath = bpy.path.relpath(str(dds_path))
                                 bpy.data.images[node.image.name].name = dds_filename
-                                os.remove(image_copy_path)
 
         self.report({'INFO'}, "DDS conversion complete.")
         return {'FINISHED'}
@@ -141,9 +141,8 @@ class OBJECT_OT_FixMipMaps(bpy.types.Operator):
     def execute(self, context):
         selected_object = context.active_object
         blend_file_dir = bpy.path.abspath("//")
-        fixed_dds_dir = os.path.join(blend_file_dir, "fixed-dds-textures")
-        if not os.path.exists(fixed_dds_dir):
-            os.makedirs(fixed_dds_dir)
+        fixed_dds_dir = Path(blend_file_dir) / "fixed-dds-textures"
+        fixed_dds_dir.mkdir(parents=True, exist_ok=True)
 
         for material_slot in selected_object.material_slots:
             material = material_slot.material
@@ -151,22 +150,9 @@ class OBJECT_OT_FixMipMaps(bpy.types.Operator):
                 for node in material.node_tree.nodes:
                     if node.type == 'TEX_IMAGE' and node.image:
                         image_path = bpy.path.abspath(node.image.filepath)
-                        if os.path.exists(image_path) and image_path.lower().endswith('.dds'):
-                            fixed_dds_path = os.path.join(fixed_dds_dir, os.path.basename(image_path))
-                            temp_png_path = os.path.splitext(fixed_dds_path)[0] + ".png"
-                            convert_to_png(image_path, temp_png_path)
-                            material_compression_format = get_compression_format_from_name(material.name)
-                            if material_compression_format:
-                                convert_to_dds(temp_png_path, fixed_dds_path, material_compression_format)
-                            else:
-                                original_compression_format = get_compression_format_from_name(os.path.basename(image_path))
-                                if original_compression_format:
-                                    convert_to_dds(temp_png_path, fixed_dds_path, original_compression_format)
-                                else:
-                                    convert_to_dds(temp_png_path, fixed_dds_path, "BC3_UNORM")
-                            node.image.filepath = bpy.path.relpath(fixed_dds_path)
-                        else:
-                            node.image.filepath = bpy.path.relpath(image_path)
+                        if Path(image_path).exists() and image_path.lower().endswith('.dds'):
+                            fix_mip_maps_for_image(image_path, fixed_dds_dir)
+                            node.image.filepath = bpy.path.relpath(str(fixed_dds_dir / Path(image_path).name))
 
         self.report({'INFO'}, "Mip Maps fixed.")
         return {'FINISHED'}
@@ -181,30 +167,10 @@ class OBJECT_OT_FixFolderMipMaps(bpy.types.Operator):
         selected_folder = context.scene.selected_folder
 
         if selected_folder:
-            fixed_dds_folder = os.path.join(selected_folder, "Fixed_DDS")
-            if not os.path.exists(fixed_dds_folder):
-                os.makedirs(fixed_dds_folder)
+            fixed_dds_folder = Path(selected_folder) / "Fixed_DDS"
+            fixed_dds_folder.mkdir(parents=True, exist_ok=True)
 
-            for file_name in os.listdir(selected_folder):
-                file_path = os.path.join(selected_folder, file_name)
-                if os.path.isfile(file_path) and file_name.lower().endswith('.dds'):
-                    fixed_dds_path = os.path.join(fixed_dds_folder, file_name)
-                    temp_png_path = os.path.splitext(file_path)[0] + ".png"
-                    convert_to_png(file_path, temp_png_path)
-                    
-                    material_name = os.path.splitext(file_name)[0]
-                    material_compression_format = get_compression_format_from_name(material_name)
-                    
-                    if material_compression_format:
-                        convert_to_dds(temp_png_path, fixed_dds_path, material_compression_format)
-                    else:
-                        original_compression_format = get_compression_format_from_name(file_name)
-                        if original_compression_format:
-                            convert_to_dds(temp_png_path, fixed_dds_path, original_compression_format)
-                        else:
-                            convert_to_dds(temp_png_path, fixed_dds_path, "BC3_UNORM")
-                            
-                    os.remove(temp_png_path)
+            fix_folder_mip_maps(selected_folder, fixed_dds_folder)
 
             self.report({'INFO'}, "Folder mip maps fixed.")
         else:
