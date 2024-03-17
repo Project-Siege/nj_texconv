@@ -7,7 +7,7 @@ bl_info = {
     "name": "TexConv",
     "author": "Nomadic Jester",
     "version": (1, 0),
-    "blender": (2, 80, 0),
+    "blender": (4, 0, 0),
     "location": "Properties > Material > TexConv",
     "description": "Convert images to DDS format using TexConv",
     "category": "Material"
