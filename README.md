@@ -11,7 +11,7 @@ TexConv is a Blender addon that facilitates the conversion of images to DDS form
 
 ## Installation
 
-1. Download the TexConv addon ZIP file from the [releases page](https://github.com/your-username/TexConv/releases).
+1. Download the TexConv addon ZIP file 
 2. In Blender, go to `Edit > Preferences > Add-ons`.
 3. Click `Install...` and select the downloaded ZIP file.
 4. Enable the TexConv addon by ticking the checkbox next to it.
