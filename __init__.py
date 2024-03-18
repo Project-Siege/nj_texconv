@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+import os
 
 bl_info = {
     "name": "TexConv",
@@ -91,8 +92,15 @@ class ConvertToDDSPanel(bpy.types.Panel):
         layout.label(text="Folder Operations:")
 
         row = layout.row(align=True)
+        if scene.selected_folder:
+            absolute_folder_path = Path(bpy.path.abspath(scene.selected_folder)).resolve()
+            display_path = str(absolute_folder_path)
+        else:
+            display_path = "No folder selected."
         row.prop(scene, "selected_folder", text="Folder")
         row.operator("object.fix_folder_mip_maps", text="Fix Mip Maps")
+
+        layout.label(text=f"Selected Folder: {display_path}")
 
 # Operator to execute DDS conversion
 class OBJECT_OT_ConvertToDDS(bpy.types.Operator):
@@ -167,10 +175,13 @@ class OBJECT_OT_FixFolderMipMaps(bpy.types.Operator):
         selected_folder = context.scene.selected_folder
 
         if selected_folder:
-            fixed_dds_folder = Path(selected_folder) / "Fixed_DDS"
+            # Convert the selected folder path to an absolute path
+            absolute_folder_path = Path(bpy.path.abspath(selected_folder)).resolve()
+
+            fixed_dds_folder = absolute_folder_path / "Fixed_DDS"
             fixed_dds_folder.mkdir(parents=True, exist_ok=True)
 
-            fix_folder_mip_maps(selected_folder, fixed_dds_folder)
+            fix_folder_mip_maps(absolute_folder_path, fixed_dds_folder)
 
             self.report({'INFO'}, "Folder mip maps fixed.")
         else:
@@ -208,4 +219,4 @@ def unregister():
     del bpy.types.Scene.selected_folder
 
 if __name__ == "__main__":
-    register()
+    register
